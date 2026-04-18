@@ -9,7 +9,6 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Intentamos usar joblib (más seguro para modelos sklearn), si falla usamos pickle
 try:
     from joblib import load as joblib_load
 except Exception:
@@ -35,7 +34,7 @@ def safe_load(path):
         return pickle.load(f)
 
 
-# Rutas de los archivos (mismo directorio)
+# Rutas de los archivos 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "modelo_regresion_logistica.pkl")
 SCALER_PATH = os.path.join(os.path.dirname(__file__), "scaler.pkl")
 
@@ -73,11 +72,11 @@ def prepare_features_from_json(json_data):
         arr = np.array(features, dtype=float).reshape(1, -1)
         return arr
 
-    # Si viene como dict
+    # Si 
     if isinstance(json_data, dict):
         data = json_data.copy()
 
-        # si el modelo tiene feature_names_in_ usamos ese orden
+        # modelo
         if hasattr(model, "feature_names_in_"):
             keys_order = list(model.feature_names_in_)
             try:
@@ -86,7 +85,7 @@ def prepare_features_from_json(json_data):
             except Exception:
                 pass
 
-        # fallback: orden alfabético
+        # alfabético
         keys = sorted(k for k in data.keys())
         values = [float(data[k]) for k in keys]
         return np.array(values, dtype=float).reshape(1, -1)
@@ -121,18 +120,18 @@ def predict():
         # Mapeo de clases: tu modelo usa 0 y 2
         label_map = {
             0: "Vive",
-            1: "Muere",  # por si algún día aparece
+            1: "Muere",  
             2: "Muere"
         }
 
         prediction_label = label_map.get(raw_pred, f"Clase {raw_pred}")
 
-        # Probabilidades si el modelo tiene predict_proba
+        # Probabilidades 
         probabilities = None
         if hasattr(model, "predict_proba"):
             proba = model.predict_proba(X)[0].tolist()
 
-            # Suponiendo orden: [0, 2]
+            # Suponiendo orden
             probabilities = {
                 "Vive": proba[0],
                 "Muere": proba[1]
