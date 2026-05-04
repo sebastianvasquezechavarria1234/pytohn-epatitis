@@ -3,10 +3,12 @@ import json
 import logging
 import numpy as np
 import pickle
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
+import time
 
 class PredictionInput(BaseModel):
     Age: float = Field(..., description="Patient age")
@@ -115,12 +117,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = (time.time() - start_time) * 1000
+    formatted_process_time = "{0:.2f}".format(process_time)
+    logger.info(f"path={request.url.path} method={request.method} duration={formatted_process_time}ms status={response.status_code}")
+    return response
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception caught: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": "An unexpected error occurred in the server."},
+    )
+
 @app.get("/")
 async def root():
+    info = ml_models.get("info", {})
     return {
         "status": "online",
-        "message": "Hepatitis Prediction API is ready.",
-        "docs": "/docs"
+        "api_name": "Hepatitis Prediction API",
+        "version": "1.0.0",
+        "model_info": {
+            "type": info.get("modelo", "N/A"),
+            "features_count": info.get("n_features", 0),
+            "metrics": info.get("metricas_test", {})
+        },
+        "endpoints": {
+            "predict": "/predict",
+            "documentation": "/docs"
+        }
     }
 
 @app.post("/predict")
