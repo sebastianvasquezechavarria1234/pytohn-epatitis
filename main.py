@@ -1,154 +1,144 @@
-# main.py
 import os
-import traceback
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import json
+import logging
 import numpy as np
+import pickle
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 try:
     from joblib import load as joblib_load
-except Exception:
+except ImportError:
     joblib_load = None
 
-import pickle
+# Paths
+BASE_DIR = os.path.dirname(__file__)
+MODEL_PATH = os.path.join(BASE_DIR, "modelo_regresion_logistica.pkl")
+SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
+INFO_PATH = os.path.join(BASE_DIR, "modelo_regresion_logistica_info.json")
 
-APP_PORT = int(os.environ.get("PORT", 5000))
-
-app = Flask(__name__)
-CORS(app)
-
+# State
+ml_models = {}
 
 def safe_load(path):
-    """Intenta cargar con joblib, si no con pickle."""
+    """Attempt to load using joblib, fallback to pickle."""
     if joblib_load:
         try:
             return joblib_load(path)
         except Exception:
             pass
-    # fallback a pickle
     with open(path, "rb") as f:
         return pickle.load(f)
 
-
-# Rutas de los archivos 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "modelo_regresion_logistica.pkl")
-SCALER_PATH = os.path.join(os.path.dirname(__file__), "scaler.pkl")
-
-# Cargamos artefactos al iniciar
-try:
-    model = safe_load(MODEL_PATH)
-except Exception as e:
-    print(f"[ERROR] No se pudo cargar el modelo desde {MODEL_PATH}: {e}")
-    model = None
-
-try:
-    scaler = safe_load(SCALER_PATH)
-except Exception as e:
-    print(f"[WARN] No se pudo cargar el scaler desde {SCALER_PATH}: {e}")
-    scaler = None
-
-
-@app.route("/")
-def index():
-    return jsonify({
-        "status": "ok",
-        "message": "API de predicción lista. POST /predict con JSON {\"features\": [...]} o un objeto de características."
-    })
-
-
-def prepare_features_from_json(json_data):
-    """
-    Acepta:
-    - {"features": [v1, v2, ...]} -> usa esa lista
-    - {"feature1": v1, "feature2": v2, ...} -> intenta ordenar según model.feature_names_in_
-    Devuelve: numpy array shape (1, n_features)
-    """
-    if "features" in json_data:
-        features = json_data["features"]
-        arr = np.array(features, dtype=float).reshape(1, -1)
-        return arr
-
-    # Si 
-    if isinstance(json_data, dict):
-        data = json_data.copy()
-
-        # modelo
-        if hasattr(model, "feature_names_in_"):
-            keys_order = list(model.feature_names_in_)
-            try:
-                values = [float(data[k]) for k in keys_order]
-                return np.array(values, dtype=float).reshape(1, -1)
-            except Exception:
-                pass
-
-        # alfabético
-        keys = sorted(k for k in data.keys())
-        values = [float(data[k]) for k in keys]
-        return np.array(values, dtype=float).reshape(1, -1)
-
-    raise ValueError("Formato de entrada no soportado")
-
-
-@app.route("/predict", methods=["POST"])
-def predict():
-    if model is None:
-        return jsonify({"error": "Modelo no cargado en el servidor."}), 500
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load model and scaler
+    try:
+        ml_models["model"] = safe_load(MODEL_PATH)
+        logger.info(f"Model loaded from {MODEL_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        ml_models["model"] = None
 
     try:
-        json_data = request.get_json(force=True)
-    except Exception:
-        return jsonify({"error": "JSON inválido o cabecera Content-Type faltante."}), 400
+        ml_models["scaler"] = safe_load(SCALER_PATH)
+        logger.info(f"Scaler loaded from {SCALER_PATH}")
+    except Exception as e:
+        logger.warning(f"Failed to load scaler: {e}")
+        ml_models["scaler"] = None
+
+    # Load metadata
+    try:
+        with open(INFO_PATH, "r") as f:
+            ml_models["info"] = json.load(f)
+        logger.info(f"Metadata loaded from {INFO_PATH}")
+    except Exception as e:
+        logger.warning(f"Failed to load metadata: {e}")
+        ml_models["info"] = {}
+
+    yield
+    ml_models.clear()
+
+app = FastAPI(
+    title="Hepatitis Prediction API",
+    description="Professional API for medical outcomes prediction based on logistic regression.",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "message": "Hepatitis Prediction API is ready.",
+        "docs": "/docs"
+    }
+
+@app.post("/predict")
+async def predict(data: dict):
+    model = ml_models.get("model")
+    scaler = ml_models.get("scaler")
+    info = ml_models.get("info")
+
+    if not model:
+        raise HTTPException(status_code=500, detail="Prediction model not loaded.")
 
     try:
-        X = prepare_features_from_json(json_data)
+        # Initial implementation (to be refined in next commit with Pydantic)
+        if "features" in data:
+            features = np.array(data["features"], dtype=float).reshape(1, -1)
+        else:
+            # Sort features based on metadata if available
+            feature_names = info.get("features", [])
+            if feature_names and all(k in data for k in feature_names):
+                features = np.array([float(data[k]) for k in feature_names]).reshape(1, -1)
+            else:
+                # Fallback to sorted keys
+                sorted_keys = sorted(data.keys())
+                features = np.array([float(data[k]) for k in sorted_keys]).reshape(1, -1)
 
-        # Aplica scaler si existe
-        if scaler is not None:
-            try:
-                X = scaler.transform(X)
-            except Exception as e:
-                print("[WARN] scaler.transform falló:", e)
+        if scaler:
+            features = scaler.transform(features)
 
-        # Predicción de clase
-        preds = model.predict(X)
-        raw_pred = preds[0].item() if hasattr(preds[0], "item") else int(preds[0])
+        prediction = model.predict(features)[0]
+        prediction = int(prediction)
 
-        # Mapeo de clases: tu modelo usa 0 y 2
-        label_map = {
-            0: "Vive",
-            1: "Muere",  
-            2: "Muere"
+        # Mapping labels
+        label_map = {0: "Vive", 1: "Muere", 2: "Muere"}
+        result = label_map.get(prediction, f"Class {prediction}")
+
+        response = {
+            "prediction": result,
+            "prediction_raw": prediction
         }
 
-        prediction_label = label_map.get(raw_pred, f"Clase {raw_pred}")
-
-        # Probabilidades 
-        probabilities = None
         if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(X)[0].tolist()
-
-            # Suponiendo orden
-            probabilities = {
-                "Vive": proba[0],
-                "Muere": proba[1]
+            probs = model.predict_proba(features)[0].tolist()
+            response["probabilities"] = {
+                "Vive": probs[0],
+                "Muere": probs[1] if len(probs) > 1 else 0.0
             }
 
-        return jsonify({
-            "prediction": prediction_label,
-            "prediction_raw": raw_pred,
-            "probabilities": probabilities
-        })
+        return response
 
-    except ValueError as ve:
-        return jsonify({"error": str(ve)}), 400
     except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": "Error interno al predecir", "detail": str(e)}), 500
-
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=APP_PORT, debug=True)
+    import uvicorn
+    port = int(os.environ.get("PORT", 5000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
